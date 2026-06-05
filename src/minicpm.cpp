@@ -623,7 +623,7 @@ ggml_tensor* MiniCPMModel::apply_rope(ggml_context* ctx,
         attn_factor = std::sqrt(1.0f + std::log(scale) / std::log(static_cast<float>(config_.rope_original_max)));
     }
 
-    return ggml_rope_ext(ctx, x, positions, const_cast<ggml_tensor*>(freq_factors),
+    return ggml_rope_ext(ctx, ggml_cont(ctx, x), positions, const_cast<ggml_tensor*>(freq_factors),
                          config_.head_dim(), GGML_ROPE_TYPE_NEOX,
                          config_.rope_original_max, config_.rope_freq_base,
                          1.0f, 0.0f, attn_factor, 32.0f, 1.0f);
@@ -768,7 +768,7 @@ ggml_tensor* MiniCPMModel::mlp_forward(ggml_context* ctx,
 
     ggml_tensor* fused = nullptr;
     if (prefer_fused_glu) {
-        fused = ggml_swiglu_split(ctx, gate, up);
+        fused = ggml_swiglu_split(ctx, ggml_cont(ctx, gate), ggml_cont(ctx, up));
     } else {
         gate = ggml_silu(ctx, gate);
         fused = ggml_mul(ctx, gate, up);
