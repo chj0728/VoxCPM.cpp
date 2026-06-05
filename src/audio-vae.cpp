@@ -639,65 +639,99 @@ ggml_tensor* AudioVAE::causal_conv1d_stateful(ggml_context* ctx,
 }
 
 ggml_tensor* AudioVAE::causal_conv1d_dw(ggml_context* ctx,
-                                        const VoxCPMBackend& backend,
-                                        ggml_tensor* x,
-                                        ggml_tensor* weight,
-                                        ggml_tensor* bias,
-                                        int stride,
-                                        int dilation,
-                                        int padding) const {
-    if (backend.type() == BackendType::CUDA) {
-        ggml_tensor* padded = x;
-        if (padding > 0) {
-            padded = ggml_pad_ext(ctx, x, padding * 2, 0, 0, 0, 0, 0, 0, 0);
-        }
+		const VoxCPMBackend& backend,
+		ggml_tensor* x,
+		ggml_tensor* weight,
+		ggml_tensor* bias,
+		int stride,
+		int dilation,
+		int padding) const {
 
-        ggml_tensor* result = ggml_conv_1d_dw(ctx, weight, padded, stride, 0, dilation);
-        if (bias) {
-            result = ggml_add(ctx, result, reshape_bias_3d(ctx, bias));
-        }
-        return ggml_cont(ctx, result);
-    }
+	if (backend.type() == BackendType::Vulkan) {
+		// The GGML library in use does not define ggml_map_custom3 for Vulkan.
+		// This causes silent audio output (or occasionally popping noises).
+		// Replace unsupported ggml_map_custom3 call with standard depthwise convolution.
 
-    auto op = std::make_unique<AudioVAEDepthwiseConvOpData>();
-    op->stride = stride;
-    op->dilation = dilation;
-    op->padding = padding;
+		ggml_tensor* padded = x;
+		if (padding > 0) padded = ggml_pad_ext(ctx, x, padding * 2, 0, 0, 0, 0, 0, 0, 0);
+		if (!ggml_is_contiguous(padded)) padded = ggml_cont(ctx, padded);
 
-    AudioVAEDepthwiseConvOpData* op_ptr = op.get();
-    depthwise_ops_.push_back(std::move(op));
-    return ggml_map_custom3(ctx, x, weight, bias, depthwise_conv_custom, GGML_N_TASKS_MAX, op_ptr);
+		ggml_tensor* result;
+		if (!(result = ggml_conv_1d_dw(ctx, weight, padded, stride, 0, dilation))) return nullptr;
+
+		if (bias) result = ggml_add(ctx, result, reshape_bias_3d(ctx, bias));
+		else if (!ggml_is_contiguous(result)) result = ggml_cont(ctx, result);
+
+		return result;
+	} else {
+		auto op = std::make_unique<AudioVAEDepthwiseConvOpData>();
+		op->stride = stride;
+		op->dilation = dilation;
+		op->padding = padding;
+
+		AudioVAEDepthwiseConvOpData* op_ptr = op.get();
+		depthwise_ops_.push_back(std::move(op));
+
+		return ggml_map_custom3(ctx, x, weight, bias, depthwise_conv_custom, GGML_N_TASKS_MAX, op_ptr);
+	}
 }
 
 ggml_tensor* AudioVAE::causal_conv1d_dw_stateful(ggml_context* ctx,
-                                                 const VoxCPMBackend& backend,
-                                                 ggml_tensor* x,
-                                                 ggml_tensor* weight,
-                                                 ggml_tensor* bias,
-                                                 int stride,
-                                                 int dilation,
-                                                 int padding,
-                                                 AudioVAEStreamingDecodeState& state,
-                                                 const std::string& state_name) const {
-    const int state_frames = padding * 2;
-    if (state_frames <= 0) {
-        return causal_conv1d_dw(ctx, backend, x, weight, bias, stride, dilation, padding);
-    }
+		const VoxCPMBackend& backend,
+		ggml_tensor* x,
+		ggml_tensor* weight,
+		ggml_tensor* bias,
+		int stride,
+		int dilation,
+		int padding,
+		AudioVAEStreamingDecodeState& state,
+		const std::string& state_name) const {
+	if (backend.type() == BackendType::Vulkan) {
+		// The GGML library in use does not define ggml_map_custom3 for Vulkan.
+		// This causes silent audio output (or occasionally popping noises).
+		// Replace unsupported ggml_map_custom3 call with standard depthwise convolution.
 
-    VOXCPM_ASSERT(backend.type() == BackendType::CUDA);
-    ggml_tensor* prev = state.take_slot(state_frames, x->ne[1], state_name);
-    ggml_tensor* x_full = ggml_concat(ctx, prev, x, 0);
-    ggml_tensor* result = ggml_conv_1d_dw(ctx, weight, x_full, stride, 0, dilation);
-    if (bias) {
-        result = ggml_add(ctx, result, reshape_bias_3d(ctx, bias));
-    }
+		const int64_t state_frames = padding * 2;
+		if (state_frames <= 0) return causal_conv1d_dw(ctx, backend, x, weight, bias, stride, dilation, padding);
 
-    const size_t state_offset = static_cast<size_t>(x_full->ne[0] - state_frames) * x_full->nb[0];
-    ggml_tensor* next_state =
-        ggml_view_3d(ctx, x_full, state_frames, x_full->ne[1], x_full->ne[2], x_full->nb[1], x_full->nb[2], state_offset);
-    next_state = ggml_cont(ctx, next_state);
-    state.queue_update(next_state);
-    return ggml_cont(ctx, result);
+		ggml_tensor* x_full = ggml_concat(
+			ctx,
+			state.take_slot(state_frames, x->ne[1], state_name),
+			x,
+			0
+		);
+
+		const int64_t kernel = weight->ne[0];
+		ggml_tensor* result = conv1d_mul_mat_impl(ctx, weight, x_full, static_cast<int>(kernel), stride, dilation);
+
+		if (bias) result = ggml_add(ctx, result, reshape_bias_3d(ctx, bias));
+		else if (!ggml_is_contiguous(result)) result = ggml_cont(ctx, result);
+
+		const size_t state_offset = static_cast<size_t>(x_full->ne[0] - state_frames) * x_full->nb[0];
+		ggml_tensor* next_state = ggml_view_3d(
+			ctx,
+			x_full,
+			state_frames,
+			x_full->ne[1],
+			x_full->ne[2],
+			x_full->nb[1],
+			x_full->nb[2],
+			state_offset
+		);
+		next_state = ggml_cont(ctx, next_state);
+		state.queue_update(next_state);
+
+		return result;
+	} else {
+		auto op = std::make_unique<AudioVAEDepthwiseConvOpData>();
+		op->stride = stride;
+		op->dilation = dilation;
+		op->padding = padding;
+
+		AudioVAEDepthwiseConvOpData* op_ptr = op.get();
+		depthwise_ops_.push_back(std::move(op));
+		return ggml_map_custom3(ctx, x, weight, bias, depthwise_conv_custom, GGML_N_TASKS_MAX, op_ptr);
+	}
 }
 
 ggml_tensor* AudioVAE::causal_transpose_conv1d(ggml_context* ctx,
