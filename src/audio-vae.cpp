@@ -654,14 +654,13 @@ ggml_tensor* AudioVAE::causal_conv1d_dw(ggml_context* ctx,
 
 		ggml_tensor* padded = x;
 		if (padding > 0) padded = ggml_pad_ext(ctx, x, padding * 2, 0, 0, 0, 0, 0, 0, 0);
-		if (!ggml_is_contiguous(padded)) padded = ggml_cont(ctx, padded);
+		VOXCPM_ASSERT(ggml_is_contiguous(padded));
 
 		ggml_tensor* result;
 		if (!(result = ggml_conv_1d_dw(ctx, weight, padded, stride, 0, dilation))) return nullptr;
 
 		if (bias) result = ggml_add(ctx, result, reshape_bias_3d(ctx, bias));
-		else if (!ggml_is_contiguous(result)) result = ggml_cont(ctx, result);
-
+		VOXCPM_ASSERT(ggml_is_contiguous(result));
 		return result;
 	} else {
 		auto op = std::make_unique<AudioVAEDepthwiseConvOpData>();
@@ -705,7 +704,7 @@ ggml_tensor* AudioVAE::causal_conv1d_dw_stateful(ggml_context* ctx,
 		ggml_tensor* result = conv1d_mul_mat_impl(ctx, weight, x_full, static_cast<int>(kernel), stride, dilation);
 
 		if (bias) result = ggml_add(ctx, result, reshape_bias_3d(ctx, bias));
-		else if (!ggml_is_contiguous(result)) result = ggml_cont(ctx, result);
+		VOXCPM_ASSERT(ggml_is_contiguous(result));
 
 		const size_t state_offset = static_cast<size_t>(x_full->ne[0] - state_frames) * x_full->nb[0];
 		ggml_tensor* next_state = ggml_view_3d(
