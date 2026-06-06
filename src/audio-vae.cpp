@@ -876,8 +876,9 @@ ggml_tensor* AudioVAE::decoder_block_forward(ggml_context* ctx,
     x = snake_activation(ctx, x, weights.snake_alpha);
     x = causal_transpose_conv1d(ctx,
                                 x,
-                                weights.conv_weight,
-                                weights.conv_bias,
+                                // ggml_cast because Vulkan back-end requires 32-bit.
+                                ggml_cast(ctx, weights.conv_weight, GGML_TYPE_F32),
+                                ggml_cast(ctx, weights.conv_bias, GGML_TYPE_F32),
                                 stride,
                                 static_cast<int>(std::ceil(stride / 2.0f)),
                                 stride % 2);
@@ -899,8 +900,9 @@ ggml_tensor* AudioVAE::decoder_block_forward_stateful(ggml_context* ctx,
     x = snake_activation(ctx, x, weights.snake_alpha);
     x = causal_transpose_conv1d_stateful(ctx,
                                          x,
-                                         weights.conv_weight,
-                                         weights.conv_bias,
+                                         // ggml_cast because Vulkan back-end requires 32-bit.
+                                         ggml_cast(ctx, weights.conv_weight, GGML_TYPE_F32),
+                                         ggml_cast(ctx, weights.conv_bias, GGML_TYPE_F32),
                                          stride,
                                          static_cast<int>(std::ceil(stride / 2.0f)),
                                          stride % 2,
@@ -1048,7 +1050,7 @@ ggml_tensor* AudioVAE::decode(VoxCPMContext& ctx,
     VOXCPM_ASSERT(z != nullptr);
     ggml_context* raw = ctx.raw_context();
 
-    ggml_tensor* x = z;
+    ggml_tensor* x = ggml_cast(raw, z, GGML_TYPE_F32);	// Vulkan back-end currently requires 32-bit.
     if (ggml_n_dims(x) == 2) {
         x = ggml_reshape_3d(raw, x, x->ne[0], x->ne[1], 1);
     }
@@ -1100,7 +1102,7 @@ ggml_tensor* AudioVAE::decode_streaming(VoxCPMContext& ctx,
     VOXCPM_ASSERT(z != nullptr);
     ggml_context* raw = ctx.raw_context();
 
-    ggml_tensor* x = z;
+    ggml_tensor* x = ggml_cast(raw, z, GGML_TYPE_F32);	// Vulkan back-end currently requires 32-bit.
     if (ggml_n_dims(x) == 2) {
         x = ggml_reshape_3d(raw, x, x->ne[0], x->ne[1], 1);
     }
