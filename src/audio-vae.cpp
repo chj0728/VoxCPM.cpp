@@ -646,6 +646,23 @@ ggml_tensor* AudioVAE::causal_conv1d_dw(ggml_context* ctx,
                                         int stride,
                                         int dilation,
                                         int padding) const {
+
+    if (backend.type() == BackendType::Vulkan) {
+        // The GGML library in use does not define ggml_map_custom3 for Vulkan.
+        // This causes silent audio output (or occasionally popping noises).
+        // Replace unsupported ggml_map_custom3 call with standard depthwise convolution.
+
+        ggml_tensor* padded = x;
+        if (padding > 0) padded = ggml_pad_ext(ctx, x, padding * 2, 0, 0, 0, 0, 0, 0, 0);
+        padded = ggml_cont(ctx, padded);
+
+        ggml_tensor* result;
+        if (!(result = ggml_conv_1d_dw(ctx, weight, padded, stride, 0, dilation))) return nullptr;
+
+        if (bias) result = ggml_add(ctx, result, reshape_bias_3d(ctx, bias));
+        return ggml_cont(ctx, result);
+    }
+
     if (backend.type() == BackendType::CUDA) {
         ggml_tensor* padded = x;
         if (padding > 0) {
@@ -679,6 +696,39 @@ ggml_tensor* AudioVAE::causal_conv1d_dw_stateful(ggml_context* ctx,
                                                  int padding,
                                                  AudioVAEStreamingDecodeState& state,
                                                  const std::string& state_name) const {
+    if (backend.type() == BackendType::Vulkan) {
+        // The GGML library in use does not define ggml_map_custom3 for Vulkan.
+        // This causes silent audio output (or occasionally popping noises).
+        // Replace unsupported ggml_map_custom3 call with standard depthwise convolution.
+
+        const int64_t state_frames = padding * 2;
+        if (state_frames <= 0) return causal_conv1d_dw(ctx, backend, x, weight, bias, stride, dilation, padding);
+
+        ggml_tensor* x_full = ggml_concat(
+            ctx,
+            state.take_slot(state_frames, x->ne[1], state_name),
+            x,
+            0
+        );
+
+        const int64_t kernel = weight->ne[0];
+        ggml_tensor* result = conv1d_mul_mat_impl(ctx, weight, x_full, static_cast<int>(kernel), stride, dilation);
+
+        if (bias) result = ggml_add(ctx, result, reshape_bias_3d(ctx, bias));
+
+        const size_t state_offset = static_cast<size_t>(x_full->ne[0] - state_frames) * x_full->nb[0];
+        ggml_tensor* next_state = ggml_view_3d(
+            ctx, x_full, state_frames,
+            x_full->ne[1], x_full->ne[2],
+            x_full->nb[1], x_full->nb[2],
+            state_offset
+        );
+        next_state = ggml_cont(ctx, next_state);
+        state.queue_update(next_state);
+
+        return ggml_cont(ctx, result);
+    }
+
     const int state_frames = padding * 2;
     if (state_frames <= 0) {
         return causal_conv1d_dw(ctx, backend, x, weight, bias, stride, dilation, padding);
@@ -841,10 +891,16 @@ ggml_tensor* AudioVAE::decoder_block_forward(ggml_context* ctx,
                                              int stride) const {
     x = sample_rate_condition_forward(ctx, x, weights.sr_cond, sr_bucket);
     x = snake_activation(ctx, x, weights.snake_alpha);
+    ggml_tensor* conv_weight = weights.conv_weight;
+    ggml_tensor* conv_bias = weights.conv_bias;
+    if (backend.type() == BackendType::Vulkan) {
+        conv_weight = ggml_cast(ctx, conv_weight, GGML_TYPE_F32);
+        conv_bias = ggml_cast(ctx, conv_bias, GGML_TYPE_F32);
+    }
     x = causal_transpose_conv1d(ctx,
                                 x,
-                                weights.conv_weight,
-                                weights.conv_bias,
+                                conv_weight,
+                                conv_bias,
                                 stride,
                                 static_cast<int>(std::ceil(stride / 2.0f)),
                                 stride % 2);
@@ -864,10 +920,16 @@ ggml_tensor* AudioVAE::decoder_block_forward_stateful(ggml_context* ctx,
                                                       const std::string& state_prefix) const {
     x = sample_rate_condition_forward(ctx, x, weights.sr_cond, sr_bucket);
     x = snake_activation(ctx, x, weights.snake_alpha);
+    ggml_tensor* conv_weight = weights.conv_weight;
+    ggml_tensor* conv_bias = weights.conv_bias;
+    if (backend.type() == BackendType::Vulkan) {
+        conv_weight = ggml_cast(ctx, conv_weight, GGML_TYPE_F32);
+        conv_bias = ggml_cast(ctx, conv_bias, GGML_TYPE_F32);
+    }
     x = causal_transpose_conv1d_stateful(ctx,
                                          x,
-                                         weights.conv_weight,
-                                         weights.conv_bias,
+                                         conv_weight,
+                                         conv_bias,
                                          stride,
                                          static_cast<int>(std::ceil(stride / 2.0f)),
                                          stride % 2,
@@ -1015,15 +1077,21 @@ ggml_tensor* AudioVAE::decode(VoxCPMContext& ctx,
     VOXCPM_ASSERT(z != nullptr);
     ggml_context* raw = ctx.raw_context();
 
-    ggml_tensor* x = z;
+    ggml_tensor* x = backend.type() == BackendType::Vulkan ? ggml_cast(raw, z, GGML_TYPE_F32) : z;
     if (ggml_n_dims(x) == 2) {
         x = ggml_reshape_3d(raw, x, x->ne[0], x->ne[1], 1);
     }
     VOXCPM_ASSERT(x->ne[1] == config_.latent_dim);
     VOXCPM_ASSERT(x->ne[2] == 1);
 
-    x = causal_conv1d_dw(raw, backend, x, weights_.decoder_model_0_weight, weights_.decoder_model_0_bias, 1, 1, 3);
-    x = causal_conv1d(raw, x, weights_.decoder_model_1_weight, weights_.decoder_model_1_bias, 1, 1, 1, 0);
+    x = causal_conv1d_dw(raw, backend, x,
+        weights_.decoder_model_0_weight,
+        weights_.decoder_model_0_bias,
+        1, 1, 3);
+    x = causal_conv1d(raw, x,
+        weights_.decoder_model_1_weight,
+        weights_.decoder_model_1_bias,
+        1, 1, 1, 0);
 
     ggml_tensor* sr_bucket = nullptr;
     const bool has_sr_conditioning = std::any_of(weights_.decoder_blocks.begin(),
@@ -1048,7 +1116,10 @@ ggml_tensor* AudioVAE::decode(VoxCPMContext& ctx,
     }
 
     x = snake_activation(raw, x, weights_.decoder_final_snake_alpha);
-    x = causal_conv1d(raw, x, weights_.decoder_final_conv_weight, weights_.decoder_final_conv_bias, 7, 1, 1, 3);
+    x = causal_conv1d(raw, x,
+                      weights_.decoder_final_conv_weight,
+                      weights_.decoder_final_conv_bias,
+                      7, 1, 1, 3);
     x = ggml_tanh(raw, x);
     ggml_set_output(x);
     return x;
@@ -1067,24 +1138,21 @@ ggml_tensor* AudioVAE::decode_streaming(VoxCPMContext& ctx,
     VOXCPM_ASSERT(z != nullptr);
     ggml_context* raw = ctx.raw_context();
 
-    ggml_tensor* x = z;
+    ggml_tensor* x = backend.type() == BackendType::Vulkan ? ggml_cast(raw, z, GGML_TYPE_F32) : z;
     if (ggml_n_dims(x) == 2) {
         x = ggml_reshape_3d(raw, x, x->ne[0], x->ne[1], 1);
     }
     VOXCPM_ASSERT(x->ne[1] == config_.latent_dim);
     VOXCPM_ASSERT(x->ne[2] == 1);
 
-    x = causal_conv1d_dw_stateful(raw,
-                                  backend,
-                                  x,
-                                  weights_.decoder_model_0_weight,
-                                  weights_.decoder_model_0_bias,
-                                  1,
-                                  1,
-                                  3,
-                                  state,
-                                  "decoder.model0.depthwise");
-    x = causal_conv1d(raw, x, weights_.decoder_model_1_weight, weights_.decoder_model_1_bias, 1, 1, 1, 0);
+    x = causal_conv1d_dw_stateful(raw, backend, x,
+        weights_.decoder_model_0_weight,
+        weights_.decoder_model_0_bias,
+        1, 1, 3, state, "decoder.model0.depthwise");
+    x = causal_conv1d(raw, x,
+        weights_.decoder_model_1_weight,
+        weights_.decoder_model_1_bias,
+        1, 1, 1, 0);
 
     ggml_tensor* sr_bucket = nullptr;
     const bool has_sr_conditioning = std::any_of(weights_.decoder_blocks.begin(),
@@ -1106,21 +1174,15 @@ ggml_tensor* AudioVAE::decode_streaming(VoxCPMContext& ctx,
                                            weights_.decoder_blocks[static_cast<size_t>(i)],
                                            sr_bucket,
                                            config_.decoder_rates[static_cast<size_t>(i)],
-                                           state,
-                                           "decoder.block" + std::to_string(i));
+                                           state, "decoder.block" + std::to_string(i));
     }
 
     x = snake_activation(raw, x, weights_.decoder_final_snake_alpha);
-    x = causal_conv1d_stateful(raw,
-                               x,
-                               weights_.decoder_final_conv_weight,
-                               weights_.decoder_final_conv_bias,
-                               7,
-                               1,
-                               1,
-                               3,
-                               state,
-                               "decoder.final.conv");
+    x = causal_conv1d_stateful(raw, x,
+       weights_.decoder_final_conv_weight,
+       weights_.decoder_final_conv_bias,
+       7, 1, 1, 3,
+       state, "decoder.final.conv");
     x = ggml_tanh(raw, x);
     ggml_set_output(x);
     return x;
