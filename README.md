@@ -18,6 +18,8 @@ This directory now serves as the standalone repository root for `VoxCPM.cpp`.
 - `CMakeLists.txt` already supports downloading `nlohmann_json` with `FetchContent` when `third_party/json` is absent.
 - `VoxCPM2` is now supported on a preliminary basis. The current C++ runtime can load exported `VoxCPM2` GGUF weights, run end-to-end inference, use the new reference-mode plumbing, and produce 48kHz output through the `AudioVAE V2` path, but quality and parity are still under active validation.
 
+Maintainer note: I am currently also developing other GGML inference projects for TTS and OCR models, along with related GUI applications. As a result, many PRs and issues in this repository may be handled with Codex assistance.
+
 ## Refactor Preview
 
 A larger Torch-to-GGML runtime refactor is planned. The design direction is documented in:
