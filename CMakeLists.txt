@@ -117,6 +117,10 @@ target_link_libraries(voxcpm
         Threads::Threads
 )
 
+if(VOXCPM_BUILD_TESTS)
+    target_link_libraries(voxcpm PUBLIC nlohmann_json::nlohmann_json)
+endif()
+
 target_compile_definitions(voxcpm
     PUBLIC
         VOXCPM_ENABLE_MP3=$<IF:$<BOOL:${VOXCPM_ENABLE_MP3}>,1,0>
