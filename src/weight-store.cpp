@@ -21,7 +21,11 @@ bool load_tensor_data(FILE* file,
     const size_t offset = gguf_get_data_offset(gguf_ctx) + gguf_get_tensor_offset(gguf_ctx, tensor_idx);
     const size_t nbytes = ggml_nbytes(tensor);
 
-    if (fseek(file, static_cast<long>(offset), SEEK_SET) != 0) {
+#ifdef _WIN32
+    if (_fseeki64(file, static_cast<__int64>(offset), SEEK_SET) != 0) {
+#else
+    if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0) {
+#endif
         return false;
     }
 
