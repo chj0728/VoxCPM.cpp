@@ -101,7 +101,7 @@ Options parse_args(int argc, char** argv) {
                 << "  --backend TYPE        cpu|cuda|vulkan|auto\n"
                 << "  --threads N           Default: 4\n"
                 << "  --max-queue N         Default: 8\n"
-                << "  --max-attempts N      Default: 1\n"
+                << "  --max-attempts N      Default: 3\n"
                 << "  --max-decode-steps N  Override per-request decode step cap, 0 keeps backend default\n"
                 << "  --output-sample-rate HZ  Optional output resample rate before encoding\n"
                 << "  --api-key KEY         Required unless --disable-auth\n"
