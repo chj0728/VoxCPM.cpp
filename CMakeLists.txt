@@ -59,16 +59,15 @@ set(GGML_CUDA ${VOXCPM_CUDA} CACHE BOOL "ggml: use CUDA" FORCE)
 set(GGML_NATIVE ${VOXCPM_NATIVE} CACHE BOOL "ggml: optimize the build for the current system" FORCE)
 add_subdirectory(${GGML_DIR} ggml)
 
-# nlohmann_json is only required for tests / trace tooling.
-if(VOXCPM_BUILD_TESTS)
-    set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party/json)
-    if(EXISTS ${JSON_DIR}/CMakeLists.txt)
-        add_subdirectory(${JSON_DIR} json)
-    else()
-        include(FetchContent)
-        FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
-        FetchContent_MakeAvailable(json)
-    endif()
+# nlohmann_json is a dependency of the core library (src/server_common.cpp),
+# not just the tests, so make it available unconditionally.
+set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party/json)
+if(EXISTS ${JSON_DIR}/CMakeLists.txt)
+    add_subdirectory(${JSON_DIR} json)
+else()
+    include(FetchContent)
+    FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
+    FetchContent_MakeAvailable(json)
 endif()
 
 # =============================================================================
@@ -117,9 +116,7 @@ target_link_libraries(voxcpm
         Threads::Threads
 )
 
-if(VOXCPM_BUILD_TESTS)
-    target_link_libraries(voxcpm PUBLIC nlohmann_json::nlohmann_json)
-endif()
+target_link_libraries(voxcpm PUBLIC nlohmann_json::nlohmann_json)
 
 target_compile_definitions(voxcpm
     PUBLIC
