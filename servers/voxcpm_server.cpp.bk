@@ -6,16 +6,12 @@
 
 #include <condition_variable>
 #include <cstdlib>
-#include <deque>
-#include <exception>
 #include <filesystem>
 #include <iostream>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
 
 namespace voxcpm {
 namespace {
@@ -340,58 +336,6 @@ private:
     std::condition_variable cv_;
 };
 
-class ChunkedAudioStream {
-public:
-    void push(std::vector<uint8_t> chunk) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (closed_) {
-                return;
-            }
-            chunks_.push_back(std::move(chunk));
-        }
-        cv_.notify_one();
-    }
-
-    void close() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            closed_ = true;
-        }
-        cv_.notify_all();
-    }
-
-    void close_with_exception(std::exception_ptr error) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            error_ = std::move(error);
-            closed_ = true;
-        }
-        cv_.notify_all();
-    }
-
-    bool wait_pop(std::vector<uint8_t>& chunk) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [&]() { return !chunks_.empty() || closed_; });
-        if (!chunks_.empty()) {
-            chunk = std::move(chunks_.front());
-            chunks_.pop_front();
-            return true;
-        }
-        if (error_) {
-            std::rethrow_exception(error_);
-        }
-        return false;
-    }
-
-private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::deque<std::vector<uint8_t>> chunks_;
-    std::exception_ptr error_;
-    bool closed_ = false;
-};
-
 }  // namespace
 }  // namespace voxcpm
 
@@ -500,7 +444,7 @@ int main(int argc, char** argv) {
                     return;
                 }
 
-                auto permit = queue.acquire();
+                const auto permit = queue.acquire();
                 if (!permit.has_value()) {
                     respond_error(res, 503, "Synthesis queue is full.", "server_error", "queue_full");
                     return;
@@ -511,67 +455,6 @@ int main(int argc, char** argv) {
                     prompt = voice_store.load_voice(ctx.voice_id);
                 } catch (const std::exception&) {
                     respond_error(res, 400, "Unknown voice id.", "invalid_request_error", "voice_not_found");
-                    return;
-                }
-
-                if (!ctx.sse && ctx.format == AudioResponseFormat::Pcm) {
-                    auto stream = std::make_shared<ChunkedAudioStream>();
-                    SynthesisRequest request;
-                    request.text = ctx.input;
-                    request.prompt = std::move(prompt);
-                    request.max_decode_steps = options.max_decode_steps;
-                    request.retry_badcase = (ctx.max_attempts == 1 ? false : true);
-                    request.retry_badcase_max_times = std::min(ctx.max_attempts, options.max_attempts);
-                    request.chunk_callback = [stream, &core, response_sample_rate, speed = ctx.speed](
-                                                 const std::vector<float>& chunk_waveform) {
-                        std::vector<float> prepared = prepare_response_waveform(chunk_waveform,
-                                                                                core.sample_rate(),
-                                                                                response_sample_rate,
-                                                                                speed);
-                        stream->push(encode_audio(AudioResponseFormat::Pcm, prepared, response_sample_rate));
-                    };
-
-                    auto producer_permit = std::move(*permit);
-                    std::thread([stream,
-                                 &core,
-                                 request = std::move(request),
-                                 producer_permit = std::move(producer_permit)]() mutable {
-                        try {
-                            core.synthesize(request);
-                            stream->close();
-                        } catch (...) {
-                            stream->close_with_exception(std::current_exception());
-                        }
-                    }).detach();
-
-                    res.set_header("Cache-Control", "no-cache");
-                    res.set_header("X-Accel-Buffering", "no");
-                    res.set_chunked_content_provider(
-                        audio_content_type(ctx.format),
-                        [stream](size_t, httplib::DataSink& sink) mutable {
-                            std::vector<uint8_t> chunk;
-                            try {
-                                if (!stream->wait_pop(chunk)) {
-                                    sink.done();
-                                    return true;
-                                }
-                            } catch (const std::exception& e) {
-                                std::cerr << "Streaming PCM synthesis failed: " << e.what() << "\n";
-                                sink.done();
-                                return true;
-                            } catch (...) {
-                                std::cerr << "Streaming PCM synthesis failed with an unknown error\n";
-                                sink.done();
-                                return true;
-                            }
-                            if (chunk.empty()) {
-                                return true;
-                            }
-                            return sink.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
-                        },
-                        [stream](bool) {
-                            stream->close();
-                        });
                     return;
                 }
 
